@@ -1,0 +1,115 @@
+#!/usr/bin/env perl
+use 5.024;
+use Moo;
+use warnings;
+use experimental qw< postderef signatures >;
+no warnings qw< experimental::postderef experimental::signatures >;
+
+use Git::Wrapper;
+use Try::Catch;
+use POSIX 'strftime';
+use Path::Tiny 'path';
+use Log::Log4perl::Tiny qw< :easy >;
+
+has private => (is => 'ro', required => 1);
+has public  => (is => 'ro', required => 1);
+has dir     => (is => 'ro', default => 'tmp');
+has git     => (is => 'lazy');
+
+exit(
+   sub (@args) {
+      my %config = (dir => 'tmp');
+      for my $key (qw< DIR PRIVATE PUBLIC > ) {
+         $config{lc $key} = $ENV{$key} if defined $ENV{$key};
+      }
+      __PACKAGE__->new(\%config)->run ? 0 : 1;
+   }->(@ARGV)
+) unless caller;
+
+sub run ($self) {
+   try {
+      $self->ensure_local_master();
+
+      my $today = strftime '%Y-%m-%d', localtime;
+      $self->delete_tag($today);
+      $self->refresh_local_copy;
+
+      $self->has_tag($today) or die "no tag for <$today>\n";
+      $self->advance_to_tag($today);
+      $self->update_public;
+      INFO 'update done';
+      return 1;
+   } ## end try
+   catch {
+      warn "$_\n";
+   };
+}
+
+sub _build_git ($self) { return Git::Wrapper->new($self->dir) }
+
+sub ensure_local_master ($self) {
+   try {
+      $self->git->checkout('master');
+   }
+   catch {
+      $self->reset_local_copy;
+      $self->git->checkout(qw< -b master public/master >);
+   };
+}
+
+sub reset_local_copy ($self) {
+   my $dir = $self->dir;
+   my $git = $self->git;
+   path($dir)->remove_tree({safe => 0});
+   INFO "cloning private repo into $dir";
+   $git->clone(qw< -o private >, $self->private, $dir);
+   INFO 'fetching public repo';
+   $git->remote(add => public => $self->public);
+   $git->fetch('public');
+   return;
+}
+
+sub refresh_local_copy ($self) {
+   my $git = $self->git;
+   INFO 'fetching public repo';
+   $git->fetch(qw< public        >);
+   INFO 'fetching private repo';
+   $git->fetch(qw< private --tag >);
+}
+
+sub has_tag ($s, $t) { scalar grep { $t eq $_ } $s->git->tag }
+sub delete_tag ($self, $tag) {
+   return unless $self->has_tag($tag);
+   $self->git->tag(-d => $tag);
+}
+
+sub advance_to_tag ($s, $t) { $s->git->merge('--ff-only' => $t) }
+
+sub update_public ($s) { $s->git->push(public => 'master') }
+
+__END__
+sub git_branch ($git) {
+   my $current;
+   my @branches = map {
+      my ($f, $name, $sha1, $msg) =
+        m{\A
+           (.) \s+   # flag
+           ((?: \(.*?\) ) | (?:\S+)) \s+ # name
+           (\S+) \s+ # SHA1
+           (.*)      # log message title
+        }mxs;
+      my $branch = {
+         name        => $name,
+         sha1        => $sha1,
+         message     => $msg,
+         is_current  => ($f eq '*' ? 1 : 0),
+         is_detached => (substr($name, 0, 1) eq '(' ? 1 : 0),
+      };
+      $current = $branch if $branch->{is_current};
+      $branch;
+   } $git->branch(qw< --no-color -av >);
+   return {
+      current => $current,
+      branches => \@branches,
+   };
+} ## end sub git_branch ($git)
