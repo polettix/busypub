@@ -10,23 +10,25 @@ use Try::Catch;
 use POSIX 'strftime';
 use Path::Tiny 'path';
 use Log::Log4perl::Tiny qw< :easy >;
+use MIME::Base64 'decode_base64';
 
 has dir        => (is => 'ro', default => 'myblog');
 has git        => (is => 'lazy');
 has private    => (is => 'ro', required => 1);
 has public     => (is => 'ro', required => 1);
-has sleep_time => (is => 'ro', default => 10 * 60); # 10 minutes
+has sleep_time => (is => 'ro', default => 10 * 60);    # 10 minutes
 has ssh_config => (is => 'ro', default => undef);
 has ssh_key    => (is => 'ro', init_arg => 'key');
 
 exit(
    sub (@args) {
       my %config = (dir => 'tmp');
-      for my $key (qw< DIR PRIVATE PUBLIC KEY SSH_CONFIG SLEEP_TIME > ) {
+      for my $key (qw< DIR PRIVATE PUBLIC KEY SSH_CONFIG SLEEP_TIME >) {
          $config{lc $key} = $ENV{$key} if defined $ENV{$key};
       }
       __PACKAGE__->new(\%config)->run;
-   }->(@ARGV)
+   }
+     ->(@ARGV)
 ) unless caller;
 
 sub run ($self) {
@@ -61,8 +63,8 @@ sub run ($self) {
          ERROR $_;
       };
       sleep $self->sleep_time;
-   }
-}
+   } ## end while ('necessary')
+} ## end sub run ($self)
 
 sub _build_git ($self) { return Git::Wrapper->new($self->dir) }
 
@@ -72,25 +74,27 @@ sub ensure_ssh_setup ($self) {
    $ssh_dir->chmod(0700);
 
    my $ssh_key = $ssh_dir->child('id_rsa-busypub');
-   $ssh_key->spew_utf8($self->ssh_key);
+   $ssh_key->spew_utf8(decode_base64($self->ssh_key));
    $ssh_key->chmod(0600);
 
    my $ssh_config = $ssh_dir->child('config');
-   my $ssh_config_content = $self->ssh_config //
-      ($ssh_config->exists ? undef : <<'END'
+   my $ssh_config_content =
+       defined($self->ssh_config) ? decode_base64($self->ssh_config)
+     : $ssh_config->exists        ? undef
+     : <<'END'
 Host *
    StrictHostKeyChecking no
    UserKnownHostsFile /dev/null
    IdentityFile ~/.ssh/id_rsa-busypub
 END
-      );
+     ;
    if (defined $ssh_config_content) {
       $ssh_config->spew_utf8($ssh_config_content);
       $ssh_config->chmod(0600);
    }
 
    return;
-}
+} ## end sub ensure_ssh_setup ($self)
 
 sub ensure_local_master ($self) {
    try {
@@ -100,7 +104,7 @@ sub ensure_local_master ($self) {
       $self->reset_local_copy;
       $self->git->checkout(qw< -b master public/master >);
    };
-}
+} ## end sub ensure_local_master ($self)
 
 sub reset_local_copy ($self) {
    my $dir = $self->dir;
@@ -112,7 +116,7 @@ sub reset_local_copy ($self) {
    $git->remote(add => public => $self->public);
    $git->fetch('public');
    return;
-}
+} ## end sub reset_local_copy ($self)
 
 sub refresh_local_copy ($self) {
    my $git = $self->git;
@@ -120,9 +124,12 @@ sub refresh_local_copy ($self) {
    $git->fetch(qw< public        >);
    INFO 'fetching private repo';
    $git->fetch(qw< private --tag >);
+} ## end sub refresh_local_copy ($self)
+
+sub has_tag ($s, $t) {
+   scalar grep { $t eq $_ } $s->git->tag;
 }
 
-sub has_tag ($s, $t) { scalar grep { $t eq $_ } $s->git->tag }
 sub delete_tag ($self, $tag) {
    return unless $self->has_tag($tag);
    $self->git->tag(-d => $tag);
