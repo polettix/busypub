@@ -22,7 +22,7 @@ has ssh_key    => (is => 'ro', init_arg => 'key');
 
 exit(
    sub (@args) {
-      my %config = (dir => 'tmp');
+      my %config;
       for my $key (qw< DIR PRIVATE PUBLIC KEY SSH_CONFIG SLEEP_TIME >) {
          $config{lc $key} = $ENV{$key} if defined $ENV{$key};
       }
