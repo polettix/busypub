@@ -11,41 +11,86 @@ use POSIX 'strftime';
 use Path::Tiny 'path';
 use Log::Log4perl::Tiny qw< :easy >;
 
-has private => (is => 'ro', required => 1);
-has public  => (is => 'ro', required => 1);
-has dir     => (is => 'ro', default => 'tmp');
-has git     => (is => 'lazy');
+has dir        => (is => 'ro', default => 'myblog');
+has git        => (is => 'lazy');
+has private    => (is => 'ro', required => 1);
+has public     => (is => 'ro', required => 1);
+has sleep_time => (is => 'ro', default => 10 * 60); # 10 minutes
+has ssh_config => (is => 'ro', default => undef);
+has ssh_key    => (is => 'ro', init_arg => 'key');
 
 exit(
    sub (@args) {
       my %config = (dir => 'tmp');
-      for my $key (qw< DIR PRIVATE PUBLIC > ) {
+      for my $key (qw< DIR PRIVATE PUBLIC KEY SSH_CONFIG SLEEP_TIME > ) {
          $config{lc $key} = $ENV{$key} if defined $ENV{$key};
       }
-      __PACKAGE__->new(\%config)->run ? 0 : 1;
+      __PACKAGE__->new(\%config)->run;
    }->(@ARGV)
 ) unless caller;
 
 sub run ($self) {
    try {
+      $self->ensure_ssh_setup if $self->ssh_key;
       $self->ensure_local_master();
-
-      my $today = strftime '%Y-%m-%d', localtime;
-      $self->delete_tag($today);
-      $self->refresh_local_copy;
-
-      $self->has_tag($today) or die "no tag for <$today>\n";
-      $self->advance_to_tag($today);
-      $self->update_public;
-      INFO 'update done';
-      return 1;
-   } ## end try
+   }
    catch {
-      warn "$_\n";
+      FATAL $_;
+      exit 1;
    };
+
+   while ('necessary') {
+      try {
+         my $today = strftime '%Y-%m-%d', localtime;
+         INFO "attempting update for <$today>";
+
+         # wipe out whatever we have cached and re-read from remotes
+         $self->delete_tag($today);
+         $self->refresh_local_copy;
+
+         if ($self->has_tag($today)) {
+            $self->advance_to_tag($today);
+            $self->update_public;
+            INFO 'update done';
+         }
+         else {
+            ERROR "no tag for <$today>";
+         }
+      } ## end try
+      catch {
+         ERROR $_;
+      };
+      sleep $self->sleep_time;
+   }
 }
 
 sub _build_git ($self) { return Git::Wrapper->new($self->dir) }
+
+sub ensure_ssh_setup ($self) {
+   my $ssh_dir = path("$ENV{HOME}/.ssh");
+   $ssh_dir->mkpath;
+   $ssh_dir->chmod(0700);
+
+   my $ssh_key = $ssh_dir->child('id_rsa-busypub');
+   $ssh_key->spew_utf8($self->ssh_key);
+   $ssh_key->chmod(0600);
+
+   my $ssh_config = $ssh_dir->child('config');
+   my $ssh_config_content = $self->ssh_config //
+      ($ssh_config->exists ? undef : <<'END'
+Host *
+   StrictHostKeyChecking no
+   UserKnownHostsFile /dev/null
+   IdentityFile ~/.ssh/id_rsa-busypub
+END
+      );
+   if (defined $ssh_config_content) {
+      $ssh_config->spew_utf8($ssh_config_content);
+      $ssh_config->chmod(0600);
+   }
+
+   return;
+}
 
 sub ensure_local_master ($self) {
    try {
@@ -86,30 +131,3 @@ sub delete_tag ($self, $tag) {
 sub advance_to_tag ($s, $t) { $s->git->merge('--ff-only' => $t) }
 
 sub update_public ($s) { $s->git->push(public => 'master') }
-
-__END__
-sub git_branch ($git) {
-   my $current;
-   my @branches = map {
-      my ($f, $name, $sha1, $msg) =
-        m{\A
-           (.) \s+   # flag
-           ((?: \(.*?\) ) | (?:\S+)) \s+ # name
-           (\S+) \s+ # SHA1
-           (.*)      # log message title
-        }mxs;
-      my $branch = {
-         name        => $name,
-         sha1        => $sha1,
-         message     => $msg,
-         is_current  => ($f eq '*' ? 1 : 0),
-         is_detached => (substr($name, 0, 1) eq '(' ? 1 : 0),
-      };
-      $current = $branch if $branch->{is_current};
-      $branch;
-   } $git->branch(qw< --no-color -av >);
-   return {
-      current => $current,
-      branches => \@branches,
-   };
-} ## end sub git_branch ($git)
