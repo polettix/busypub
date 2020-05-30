@@ -11,11 +11,17 @@ use POSIX 'strftime';
 use Path::Tiny 'path';
 use Log::Log4perl::Tiny qw< :easy >;
 use MIME::Base64 'decode_base64';
+use Time::Local 'timelocal';
+use Mojo::UserAgent;
+use MojoX::Twitter;
+use Mojo::JSON 'decode_json';
 
 has dir        => (is => 'ro', default => 'myblog');
 has git        => (is => 'lazy');
 has private    => (is => 'ro', required => 1);
 has public     => (is => 'ro', required => 1);
+has uri        => (is => 'ro', init_arg => 'latest_uri', required => 1);
+has recipients => (is => 'ro', default => sub { return [] });
 has sleep_time => (is => 'ro', default => 10 * 60);    # 10 minutes
 has ssh_config => (is => 'ro', default => undef);
 has ssh_key    => (is => 'ro', init_arg => 'key');
@@ -23,9 +29,11 @@ has ssh_key    => (is => 'ro', init_arg => 'key');
 exit(
    sub (@args) {
       my %config;
-      for my $key (qw< DIR PRIVATE PUBLIC KEY SSH_CONFIG SLEEP_TIME >) {
+      for my $key (qw< DIR PRIVATE PUBLIC KEY RECIPIENTS SSH_CONFIG SLEEP_TIME LATEST_URI >) {
          $config{lc $key} = $ENV{$key} if defined $ENV{$key};
       }
+      $config{recipients} = decode_json($config{recipients})
+         if exists $config{recipients};
       __PACKAGE__->new(\%config)->run;
    }
      ->(@ARGV)
@@ -41,30 +49,155 @@ sub run ($self) {
       exit 1;
    };
 
+   my $last_published = '';
+   my $last_notified = '';
    while ('necessary') {
-      try {
-         my $today = strftime '%Y-%m-%d', localtime;
-         INFO "attempting update for <$today>";
+      my $today = strftime '%Y-%m-%d', localtime;
+      INFO "today is <$today>";
 
-         # wipe out whatever we have cached and re-read from remotes
-         $self->delete_tag($today);
-         $self->refresh_local_copy;
+      my $sleep_time = 0;
+      if ($today eq $last_notified) { # nothing more to do today!
+         $sleep_time = time_to_tomorrow();
+         INFO "publishing/notifications for <$today> done, sleeping...";
+      }
+      elsif ($today eq $last_published) { # announce
+         INFO "trying to get status for <$today>";
+         my $last_notification;
+         try {
+            if (my $notification = $self->get_latest_notification) {
+               $last_notification = $notification->{status}
+                  if $notification->{date} eq $today;
+            }
+         }
+         catch {
+            ERROR "$_";
+         };
 
-         if ($self->has_tag($today)) {
-            $self->advance_to_tag($today);
-            $self->update_public;
-            INFO 'update done';
+         if (defined $last_notification) {
+            INFO "sending out notifications for <$today>";
+            for my $target ($self->recipients->@*) {
+               try {
+                  INFO "--> to <$target->{type}>";
+                  $self->send_notification($target, $last_notification);
+               }
+               catch {
+                  ERROR "   failed <$target->{type}>: $_";
+               };
+            }
+            $last_notified = $today;
+            $last_notification = undef; # defensive...
+            $sleep_time = time_to_tomorrow();
+            INFO 'notifications sent';
          }
          else {
-            ERROR "no tag for <$today>";
+            $sleep_time = 5; # strict polling/notifying, just in case
+            WARN "still no status update for <$today> available";
          }
-      } ## end try
-      catch {
-         ERROR $_;
-      };
-      sleep $self->sleep_time;
+      }
+      else { # have to try publishing something
+         $sleep_time = $self->sleep_time;
+         try {
+            INFO "attempting update for <$today>";
+
+            # wipe out whatever we have cached and re-read from remotes
+            $self->delete_tag($today);
+            $self->refresh_local_copy;
+
+            if ($self->has_tag($today)) {
+               if ($self->public_contains($today)) {
+                  $last_notified  = $today; # published, no notifications
+                  INFO 'published already, assuming notified too';
+               }
+               else {
+                  $self->advance_to_tag($today);
+                  $self->update_public;
+                  $last_notified = ''; # enable notifications
+                  INFO 'update done';
+               }
+               $last_published = $today; # whatever, this was done
+               $sleep_time = 0; # go to next step as soon as possible
+            }
+            else {
+               ERROR "no tag for <$today> (yet...)";
+            }
+         } ## end try
+         catch {
+            ERROR $_;
+         };
+      }
+      sleep $sleep_time;
    } ## end while ('necessary')
 } ## end sub run ($self)
+
+sub send_notification ($self, $target, $status) {
+   my $method = $self->can('send_notification_' . ($target->{type} // ''))
+      or die "unsupported type <$target->{type}> for notifications";
+   $self->$method($target, $status);
+}
+
+sub send_notification_mastodon ($self, $cfg, $status) {
+   my $uri = $cfg->{uri} // 'https://octodon.social/api/v1/statuses';
+   my $token = $cfg->{token} // die 'invalid token for mastodon';
+   my $visibility = $cfg->{visibility} // 'public';
+   return Mojo::UserAgent->new->post(
+      $uri,
+      {Authorization => "Bearer $token"},
+      form => {
+         status     => $status,
+         visibility => $visibility,
+      },
+   )->res->json;
+} ## end sub mastodon_post_status
+
+sub send_notification_twitter ($self, $cfg, $status) {
+   my $api_key        = $cfg->{api_key} or die 'no API key';
+   my $api_secret_key = $cfg->{api_secret_key} or die 'no API secret key';
+   my $access_token = $cfg->{access_token} or die 'no access token';
+   my $access_token_secret = $cfg->{access_token_secret}
+     or die 'no access token secret';
+   my $ua = MojoX::Twitter->new(
+      access_token        => $access_token,
+      access_token_secret => $access_token_secret,
+      consumer_key        => $api_key,
+      consumer_secret     => $api_secret_key,
+   );
+   return $ua->request(
+      POST => 'statuses/update',
+      {
+         status => $status,
+      }
+   );
+} ## end sub twitter_post_status
+
+
+sub get_latest_notification ($self) {
+   my $uri = $self->uri;
+   my $res = Mojo::UserAgent->new(max_redirect => 5)->get($uri)->result;
+   die "error getting ($uri): " . $res->message
+      unless $res->is_success;
+   (my $body = $res->body) =~ s{\A\s+|\s+\z}{}gmxs;
+   my ($date, $status) = split m{\n}mxs, $body, 2;
+   return {
+      date => $date,
+      status => $status,
+   };
+}
+
+sub time_to_tomorrow {
+   my @bod = localtime;
+   @bod[0..2] = (0) x 3;
+   return 24 * 60 * 60 - (time - timelocal(@bod)) + 2;
+}
+
+sub public_contains ($self, $ref) {
+   for ($self->git->branch('-a', '--contains', $ref)) {
+      my $branch = substr $_, 2;
+      return 1 if $branch eq 'remotes/public/master';
+   }
+   return 0;
+}
+
+sub commit_hash_for ($self, $r) { ($self->git->rev_parse($r))[0] }
 
 sub _build_git ($self) { return Git::Wrapper->new($self->dir) }
 
