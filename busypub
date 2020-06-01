@@ -57,9 +57,9 @@ exit(
 
 sub run ($self) {
    try {
+      $ENV{TZ} = $self->timezone if defined $self->timezone;
       $self->ensure_ssh_setup if $self->ssh_key;
       $self->ensure_local_master();
-      $ENV{TZ} = $self->timezone if defined $self->timezone;
    }
    catch {
       FATAL $_;
