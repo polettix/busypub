@@ -20,21 +20,34 @@ has dir        => (is => 'ro', default => 'myblog');
 has git        => (is => 'lazy');
 has private    => (is => 'ro', required => 1);
 has public     => (is => 'ro', required => 1);
-has uri        => (is => 'ro', init_arg => 'latest_uri', required => 1);
+has pubtime    => (is => 'ro', default => '07:00:00');
 has recipients => (is => 'ro', default => sub { return [] });
-has sleep_time => (is => 'ro', default => 10 * 60);    # 10 minutes
+has sleep_time => (is => 'ro', default => 10 * 60);            # 10 minutes
 has ssh_config => (is => 'ro', default => undef);
 has ssh_key    => (is => 'ro', init_arg => 'key');
+has timezone   => (is => 'ro', default => undef);
+has uri => (is => 'ro', init_arg => 'latest_uri', required => 1);
 
 exit(
    sub (@args) {
       my %config;
       for my $key (
-         qw< DIR PRIVATE PUBLIC KEY RECIPIENTS SSH_CONFIG SLEEP_TIME LATEST_URI >
+         qw<
+         DIR
+         KEY
+         LATEST_URI
+         PRIVATE
+         PUBLIC
+         PUBLISH_TIME
+         RECIPIENTS
+         SLEEP_TIME
+         SSH_CONFIG
+         TIMEZONE
+         >
         )
       {
          $config{lc $key} = $ENV{$key} if defined $ENV{$key};
-      } ## end for my $key (...)
+      } ## end for my $key (qw< DIR KEY...)
       $config{recipients} = decode_json($config{recipients})
         if exists $config{recipients};
       __PACKAGE__->new(\%config)->run;
@@ -46,6 +59,7 @@ sub run ($self) {
    try {
       $self->ensure_ssh_setup if $self->ssh_key;
       $self->ensure_local_master();
+      $ENV{TZ} = $self->timezone if defined $self->timezone;
    }
    catch {
       FATAL $_;
@@ -64,7 +78,7 @@ sub run ($self) {
 
       my $sleep_time = 0;
       if ($today eq $last_notified) {    # nothing more to do today!
-         $sleep_time = time_to_tomorrow();
+         $sleep_time = $self->time_to_tomorrow();
          INFO "publishing/notifications for <$today> done, sleeping...";
       }
       elsif ($today eq $last_published) {    # announce
@@ -90,10 +104,10 @@ sub run ($self) {
                catch {
                   ERROR "   failed <$target->{type}>: $_";
                };
-            } ## end for my $target ($self->...)
+            } ## end for my $target (@recipients)
             $last_notified     = $today;
-            $last_notification = undef;                # defensive...
-            $sleep_time        = time_to_tomorrow();
+            $last_notification = undef;                      # defensive...
+            $sleep_time        = $self->time_to_tomorrow();
             INFO 'notifications sent';
          } ## end if (defined $last_notification)
          else {
@@ -189,11 +203,12 @@ sub get_latest_notification ($self) {
    };
 } ## end sub get_latest_notification ($self)
 
-sub time_to_tomorrow {
+sub time_to_tomorrow ($self) {
    my @bod = localtime;
-   @bod[0 .. 2] = (0) x 3;
+   @bod[2, 1, 0] =
+     map { $_ + 0 } (split(m{:}mxs, $self->pubtime), (0) x 3);
    return 24 * 60 * 60 - (time - timelocal(@bod)) + 2;
-}
+} ## end sub time_to_tomorrow ($self)
 
 sub public_contains ($self, $ref) {
    for ($self->git->branch('-a', '--contains', $ref)) {
