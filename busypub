@@ -16,16 +16,16 @@ use Mojo::UserAgent;
 use MojoX::Twitter;
 use Mojo::JSON 'decode_json';
 
-has dir        => (is => 'ro', default => 'myblog');
-has git        => (is => 'lazy');
-has private    => (is => 'ro', required => 1);
-has public     => (is => 'ro', required => 1);
-has pubtime    => (is => 'ro', default => '07:00:00');
-has recipients => (is => 'ro', default => sub { return [] });
-has sleep_time => (is => 'ro', default => 10 * 60);            # 10 minutes
-has ssh_config => (is => 'ro', default => undef);
-has ssh_key    => (is => 'ro', init_arg => 'key');
-has timezone   => (is => 'ro', default => undef);
+has dir          => (is => 'ro', default => 'myblog');
+has git          => (is => 'lazy');
+has private      => (is => 'ro', required => 1);
+has public       => (is => 'ro', required => 1);
+has publish_time => (is => 'ro', default => '07:00:00');
+has recipients   => (is => 'ro', default => sub { return [] });
+has sleep_time   => (is => 'ro', default => 10 * 60);          # 10 minutes
+has ssh_config   => (is => 'ro', default => undef);
+has ssh_key      => (is => 'ro', init_arg => 'key');
+has timezone     => (is => 'ro', default => undef);
 has uri => (is => 'ro', init_arg => 'latest_uri', required => 1);
 
 exit(
@@ -206,7 +206,7 @@ sub get_latest_notification ($self) {
 sub time_to_tomorrow ($self) {
    my @bod = localtime;
    @bod[2, 1, 0] =
-     map { $_ + 0 } (split(m{:}mxs, $self->pubtime), (0) x 3);
+     map { $_ + 0 } (split(m{:}mxs, $self->publish_time), (0) x 3);
    return 24 * 60 * 60 - (time - timelocal(@bod)) + 2;
 } ## end sub time_to_tomorrow ($self)
 
