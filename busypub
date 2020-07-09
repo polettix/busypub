@@ -195,7 +195,7 @@ sub get_latest_notification ($self) {
    my $res = Mojo::UserAgent->new(max_redirect => 5)->get($uri)->result;
    die "error getting ($uri): " . $res->message
      unless $res->is_success;
-   (my $body = $res->body) =~ s{\A\s+|\s+\z}{}gmxs;
+   (my $body = $res->text) =~ s{\A\s+|\s+\z}{}gmxs;
    my ($date, $status) = split m{\n}mxs, $body, 2;
    return {
       date   => $date,
